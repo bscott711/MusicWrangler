@@ -1,0 +1,54 @@
+# pyproject.toml
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "music-wrangler"
+version = "1.0.0"
+description = "Scripts to automate finding, downloading, converting, and organizing a digital music library."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+  { name = "Your Name", email = "you@example.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Sound/Audio :: Conversion",
+    "Topic :: Utilities",
+]
+
+# Project dependencies are listed here.
+dependencies = [
+    "gamdl>=2.3.8",
+    "requests",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-username/music-wrangler" # Replace with your repo URL
+
+# This section makes the scripts runnable from the command line after installation.
+[project.scripts]
+process-music = "process_music:main"
+flatten-directory = "flatten_directory:main"
+
+# Optional: Configuration for the Ruff linter
+# This helps maintain code quality and style.
+[tool.ruff]
+line-length = 88
+indent-width = 4
+
+[tool.ruff.lint]
+# A good default set of rules.
+# E/W: pycodestyle errors/warnings
+# F: Pyflakes
+# I: isort (import sorting)
+# C90: McCabe complexity
+select = ["E", "W", "F", "I", "C90"]
+
+# Ignore certain rules if needed, for example:
+# ignore = ["E501"] # Uncomment to ignore "line too long" errors
