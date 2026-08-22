@@ -9,7 +9,7 @@ name = "music-wrangler"
 version = "1.0.0"
 description = "Scripts to automate finding, downloading, converting, and organizing a digital music library."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
   { name = "Your Name", email = "you@example.com" },
@@ -24,7 +24,7 @@ classifiers = [
 
 # Project dependencies are listed here.
 dependencies = [
-    "gamdl>=2.3.8",
+    "gamdl>=3.8.5",
     "requests",
 ]
 
