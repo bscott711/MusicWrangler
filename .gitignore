@@ -208,3 +208,10 @@ __marimo__/
 
 # Music
 Music/
+
+# Downbeat box setup: self-contained ffmpeg binary, gamdl auth material, and
+# staged/downloaded audio — none of this belongs in a public repo.
+bin/
+cookies.txt
+*.wvd
+staging/
