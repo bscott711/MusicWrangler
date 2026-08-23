@@ -40,7 +40,13 @@ echo "Queued:"
 cat "$LIST_FILE"
 
 echo "=== 2/5: downloading + converting ==="
-~/.local/bin/uv run process-music --list-file "$LIST_FILE" -o "$STAGING_DIR" -f "$FORMAT"
+# --cleanup: without it, the source .m4a is never deleted after conversion —
+# once its .mp3 gets moved out of staging in step 3, the *next* unrelated
+# ingest run finds the .m4a still sitting there with no .mp3 next to it
+# anymore, silently reconverts it, and re-adds the same track to the
+# library again (confirmed happening for real, resurrecting an already
+# deleted mismatched-artist track on an unrelated run).
+~/.local/bin/uv run process-music --list-file "$LIST_FILE" -o "$STAGING_DIR" -f "$FORMAT" --cleanup
 
 echo "=== 3/5: flattening into Downbeat's library ==="
 # ttml alongside the audio format: gamdl (via process-music, --synced-lyrics-format
