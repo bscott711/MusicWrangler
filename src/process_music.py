@@ -18,6 +18,76 @@ import requests
 
 # --- Worker Functions (for parallel execution) ---
 
+def _title_match_score(track_name: str, query: str) -> int:
+    a = (track_name or "").strip().lower()
+    b = (query or "").strip().lower()
+    if not a or not b:
+        return 0
+    if a == b:
+        return 3
+    if a.startswith(b) or b.startswith(a):
+        return 2
+    if b in a:
+        return 1
+    return 0
+
+
+def find_track_url(artist: str, title: str) -> str | None:
+    """
+    Resolves an Artist/Title pair to an Apple Music track URL by searching
+    for the artist first, then matching the title within *that artist's*
+    own catalog. A plain combined "Artist - Title" search silently returns
+    the wrong recording whenever the artist name collides with a common
+    word or another artist of the same name — confirmed for real: "Lit -
+    My Own Worst Enemy" resolved to Casting Crowns' song of the same title,
+    because "Lit" collides with 9+ other artists plus the slang word.
+    Mirrors downbeat's apple.service.js searchAppleByArtistAndTrack, which
+    fixed the identical problem for Tier 2's own search box.
+    """
+    try:
+        artist_resp = requests.get(
+            "https://itunes.apple.com/search",
+            params={"term": artist, "entity": "musicArtist", "attribute": "artistTerm", "limit": 10},
+            timeout=15,
+        )
+        artist_resp.raise_for_status()
+        artist_results = artist_resp.json().get("results", [])
+    except requests.exceptions.RequestException:
+        return None
+
+    normalized_artist = artist.strip().lower()
+    exact_matches = [
+        a for a in artist_results
+        if (a.get("artistName") or "").strip().lower() == normalized_artist
+    ]
+    candidate_artists = (exact_matches or artist_results)[:3]
+
+    all_tracks = []
+    for candidate in candidate_artists:
+        artist_id = candidate.get("artistId")
+        if not artist_id:
+            continue
+        try:
+            lookup_resp = requests.get(
+                "https://itunes.apple.com/lookup",
+                params={"id": artist_id, "entity": "song", "limit": 200},
+                timeout=15,
+            )
+            lookup_resp.raise_for_status()
+            all_tracks.extend(
+                r for r in lookup_resp.json().get("results", []) if r.get("wrapperType") == "track"
+            )
+        except requests.exceptions.RequestException:
+            continue
+
+    scored = [(_title_match_score(t.get("trackName", ""), title), t) for t in all_tracks]
+    scored = [s for s in scored if s[0] > 0]
+    if not scored:
+        return None
+    scored.sort(key=lambda s: s[0], reverse=True)
+    return scored[0][1].get("trackViewUrl")
+
+
 def download_one_song(line: str, output_dir: Path) -> tuple[str, str | None]:
     """
     Worker task that processes a single line from the song list.
@@ -31,24 +101,9 @@ def download_one_song(line: str, output_dir: Path) -> tuple[str, str | None]:
     artist, title = artist.strip(), title.strip()
     search_term = f"{artist} - {title}"
 
-    # Search for the song URL
-    try:
-        response = requests.get(
-            "https://itunes.apple.com/search",
-            params={"term": search_term, "entity": "song", "media": "music", "limit": 1},
-            timeout=15,
-        )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("resultCount", 0) > 0:
-            url = data["results"][0].get("trackViewUrl")
-        else:
-            return "not_found", f"'{search_term}' not found on Apple Music."
-    except requests.exceptions.RequestException as e:
-        return "fail", f"API request failed for '{search_term}': {e}"
-
+    url = find_track_url(artist, title)
     if not url:
-        return "not_found", f"URL not found in API response for '{search_term}'."
+        return "not_found", f"'{search_term}' not found on Apple Music."
 
     # Download the song
     try:
