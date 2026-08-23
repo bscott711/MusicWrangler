@@ -49,18 +49,27 @@ echo "=== 3/5: flattening into Downbeat's library ==="
 # Downbeat a co-located sidecar it can prefer over an LRCLIB search match.
 ~/.local/bin/uv run flatten-directory "$STAGING_DIR" "$DOWNBEAT_DIR/library" --formats "$FORMAT" ttml --action move
 
-echo "=== 4/5: rescanning, auto-splitting new tracks, enforcing storage cap ==="
+echo "=== 4/5: rescanning, marking new tracks for separation, enforcing storage cap ==="
+# Marks new tracks 'queued' directly rather than calling requestSeparation()
+# here — that would spawn Demucs as *this short-lived script's own* child
+# process, keeping the script (and step 5, clearing the queue) blocked
+# until separation finishes, potentially minutes after the track was
+# actually fetched. Instead this just writes the DB row and touches a
+# trigger file downbeat.service (already running, staying up regardless of
+# how long separation takes) watches to pick up the actual work.
 (cd "$DOWNBEAT_DIR" && node --env-file-if-exists=.env -e "
 import('./server/services/scanner.service.js').then(async ({ scanLibrary }) => {
   console.log('rescan:', JSON.stringify(await scanLibrary()));
 
-  const { requestSeparation } = await import('./server/services/separation.service.js');
   const { enforceLibraryStorageCap } = await import('./server/services/library.service.js');
   const { db } = await import('./server/db/connection.js');
+  const fs = await import('node:fs');
 
   const unsplit = db.prepare('SELECT id FROM tracks WHERE id NOT IN (SELECT track_id FROM track_stems)').all();
-  for (const row of unsplit) requestSeparation(row.id);
-  console.log('auto-split requested for', unsplit.length, 'track(s)');
+  const insertQueued = db.prepare(\"INSERT INTO track_stems (track_id, status) VALUES (?, 'queued')\");
+  for (const row of unsplit) insertQueued.run(row.id);
+  console.log('marked', unsplit.length, 'track(s) queued for separation');
+  fs.writeFileSync('data/separation-queue.trigger', '');
 
   console.log('eviction:', JSON.stringify(enforceLibraryStorageCap()));
 });
