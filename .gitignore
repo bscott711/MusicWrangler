@@ -216,3 +216,4 @@ bin/
 cookies.txt
 *.wvd
 staging/
+.watch-queue.lock
