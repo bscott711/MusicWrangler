@@ -43,7 +43,11 @@ echo "=== 2/5: downloading + converting ==="
 ~/.local/bin/uv run process-music --list-file "$LIST_FILE" -o "$STAGING_DIR" -f "$FORMAT"
 
 echo "=== 3/5: flattening into Downbeat's library ==="
-~/.local/bin/uv run flatten-directory "$STAGING_DIR" "$DOWNBEAT_DIR/library" --formats "$FORMAT" --action move
+# ttml alongside the audio format: gamdl (via process-music, --synced-lyrics-format
+# ttml) downloads Apple's own synced lyrics for every track that has them —
+# same rename convention lands both files under the same basename, giving
+# Downbeat a co-located sidecar it can prefer over an LRCLIB search match.
+~/.local/bin/uv run flatten-directory "$STAGING_DIR" "$DOWNBEAT_DIR/library" --formats "$FORMAT" ttml --action move
 
 echo "=== 4/5: rescanning, auto-splitting new tracks, enforcing storage cap ==="
 (cd "$DOWNBEAT_DIR" && node --env-file-if-exists=.env -e "

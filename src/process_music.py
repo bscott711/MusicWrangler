@@ -53,7 +53,10 @@ def download_one_song(line: str, output_dir: Path) -> tuple[str, str | None]:
     # Download the song
     try:
         subprocess.run(
-            ["gamdl", "--output-path", str(output_dir), url],
+            [
+                "gamdl", "--output-path", str(output_dir),
+                "--synced-lyrics-format", "ttml", url,
+            ],
             check=True, capture_output=True, text=True
         )
         return "success", f"Successfully downloaded '{search_term}'."
