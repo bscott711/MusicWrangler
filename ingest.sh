@@ -1,9 +1,10 @@
 #!/bin/bash
 # Manual, on-demand ingestion: pulls queued Artist/Title requests straight
-# from Downbeat's SQLite DB (added via Tier 2's "Add to queue" button),
-# downloads + converts via gamdl/ffmpeg, flattens into Downbeat's library,
-# rescans, auto-splits any track that doesn't have a stem yet, enforces the
-# storage cap, then clears the queue rows it just processed.
+# from Downbeat's SQLite DB (added via the "Add to queue" button, on either
+# the karaoke or drumless tier), downloads + converts via gamdl/ffmpeg,
+# flattens into Downbeat's library, rescans, auto-splits any track that
+# doesn't have vocal and/or drum stems yet, enforces the storage cap, then
+# clears the queue rows it just processed.
 #
 # Downbeat's own backend never touches gamdl/process-music — this script is
 # the only thing that does, and it's the one reaching into Downbeat's DB,
@@ -72,9 +73,16 @@ echo "=== 4/5: rescanning, marking new tracks for separation, enforcing storage 
 # here — that would spawn Demucs as *this short-lived script's own* child
 # process, keeping the script (and step 5, clearing the queue) blocked
 # until separation finishes, potentially minutes after the track was
-# actually fetched. Instead this just writes the DB row and touches a
+# actually fetched. Instead this just writes the DB rows and touches a
 # trigger file downbeat.service (already running, staying up regardless of
 # how long separation takes) watches to pick up the actual work.
+#
+# Both vocal and drum separation are queued, not just whichever tier the
+# admin happened to add the song from — being queued at all means it was a
+# deliberate "we want this track" decision, not a per-tier preference, so
+# both stems are prepared up front rather than making someone hit a
+# "Prepare X reduction" button by hand the first time they try the other
+# tier for it.
 (cd "$DOWNBEAT_DIR" && node --env-file-if-exists=.env -e "
 import('./server/services/scanner.service.js').then(async ({ scanLibrary }) => {
   console.log('rescan:', JSON.stringify(await scanLibrary()));
@@ -83,10 +91,16 @@ import('./server/services/scanner.service.js').then(async ({ scanLibrary }) => {
   const { db } = await import('./server/db/connection.js');
   const fs = await import('node:fs');
 
-  const unsplit = db.prepare('SELECT id FROM tracks WHERE id NOT IN (SELECT track_id FROM track_stems)').all();
-  const insertQueued = db.prepare(\"INSERT INTO track_stems (track_id, status) VALUES (?, 'queued')\");
-  for (const row of unsplit) insertQueued.run(row.id);
-  console.log('marked', unsplit.length, 'track(s) queued for separation');
+  const unsplitVocals = db.prepare('SELECT id FROM tracks WHERE id NOT IN (SELECT track_id FROM track_stems)').all();
+  const insertQueuedVocals = db.prepare(\"INSERT INTO track_stems (track_id, status) VALUES (?, 'queued')\");
+  for (const row of unsplitVocals) insertQueuedVocals.run(row.id);
+  console.log('marked', unsplitVocals.length, 'track(s) queued for vocal separation');
+
+  const unsplitDrums = db.prepare('SELECT id FROM tracks WHERE id NOT IN (SELECT track_id FROM track_drum_stems)').all();
+  const insertQueuedDrums = db.prepare(\"INSERT INTO track_drum_stems (track_id, status) VALUES (?, 'queued')\");
+  for (const row of unsplitDrums) insertQueuedDrums.run(row.id);
+  console.log('marked', unsplitDrums.length, 'track(s) queued for drum separation');
+
   fs.writeFileSync('data/separation-queue.trigger', '');
 
   console.log('eviction:', JSON.stringify(enforceLibraryStorageCap()));
