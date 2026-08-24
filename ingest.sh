@@ -23,8 +23,20 @@ LIST_FILE="$(pwd)/staging-list.txt"
 FORMAT="mp3"
 
 echo "=== 1/5: reading the queue from Downbeat ==="
+# migrate() first: this script imports Downbeat's own source straight off
+# disk and runs standalone, so — unlike downbeat.service, which migrates at
+# boot — it picks up a schema change the moment it's pulled, even if the
+# service itself hasn't restarted (deploy is git-push-triggered) yet. A
+# step further down querying a column/table that migrate() would have added
+# fails outright (confirmed happening for real: it took the storage-cap
+# step down mid-run, after the download had already landed, leaving the
+# queue row stuck since step 5 never got to clear it). Calling migrate()
+# here first keeps this script's view of the schema honest regardless of
+# service restart timing.
 (cd "$DOWNBEAT_DIR" && node --env-file-if-exists=.env -e "
-import('./server/db/connection.js').then(({ db }) => {
+import('./server/db/migrate.js').then(async ({ migrate }) => {
+  migrate();
+  const { db } = await import('./server/db/connection.js');
   const rows = db.prepare('SELECT track_name, artist_name FROM pending_ingest ORDER BY id').all();
   for (const row of rows) console.log(\`\${row.artist_name} - \${row.track_name}\`);
 });
