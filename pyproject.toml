@@ -28,6 +28,21 @@ dependencies = [
     "requests",
 ]
 
+# Clean edits of explicit tracks (censor-track, process-music --censor): Whisper
+# for word timing and Demucs for vocal separation. Pulls in PyTorch, so opt-in:
+#   uv sync --extra censor
+[project.optional-dependencies]
+censor = [
+    "demucs>=4.0.1",
+    "faster-whisper>=1.1.0",
+    "numpy",
+    # Demucs doesn't bound torch, so a cross-platform lock otherwise settles on
+    # 2.2.2 (the last release with Intel Mac wheels) and NumPy 1.x everywhere,
+    # which has no wheels for Python 3.13+.
+    "torch>=2.5; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "numpy>=2; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+]
+
 [project.urls]
 Homepage = "https://github.com/your-username/music-wrangler" # Replace with your repo URL
 
@@ -35,6 +50,7 @@ Homepage = "https://github.com/your-username/music-wrangler" # Replace with your
 [project.scripts]
 process-music = "process_music:main"
 flatten-directory = "flatten_directory:main"
+censor-track = "censor_track:main"
 
 # Optional: Configuration for the Ruff linter
 # This helps maintain code quality and style.

@@ -53,7 +53,9 @@ def _title_match_score(track_name: str, query: str, whole_words: bool = False) -
     return 0
 
 
-def find_track_url(artist: str, title: str, clean: bool = False) -> str | None:
+def find_track_url(
+    artist: str, title: str, clean: bool = False, explicit_fallback: bool = False
+) -> str | None:
     """
     Resolves an Artist/Title pair to an Apple Music track URL by searching
     for the artist first, then matching the title within *that artist's*
@@ -70,6 +72,8 @@ def find_track_url(artist: str, title: str, clean: bool = False) -> str | None:
     exists). The artist lookup is capped at 200 tracks and can miss cleaned
     editions of big catalogs, so a song search is merged in for that case,
     restricted to tracks whose credited artists include `artist` as a word.
+    With explicit_fallback too, an explicit version is used when no clean one
+    matches, for --censor to clean up after download.
     """
     try:
         artist_resp = requests.get(
@@ -122,18 +126,23 @@ def find_track_url(artist: str, title: str, clean: bool = False) -> str | None:
             )
         except requests.exceptions.RequestException:
             pass
-        all_tracks = [t for t in all_tracks if t.get("trackExplicitness") != "explicit"]
+        clean_tracks = [t for t in all_tracks if t.get("trackExplicitness") != "explicit"]
+        candidate_sets = [clean_tracks, all_tracks] if explicit_fallback else [clean_tracks]
+    else:
+        candidate_sets = [all_tracks]
 
-    scored = [(_title_match_score(t.get("trackName", ""), title, whole_words=clean), t) for t in all_tracks]
-    scored = [s for s in scored if s[0] > 0]
-    if not scored:
-        return None
-    scored.sort(key=lambda s: s[0], reverse=True)
-    return scored[0][1].get("trackViewUrl")
+    for tracks in candidate_sets:
+        scored = [(_title_match_score(t.get("trackName", ""), title, whole_words=clean), t) for t in tracks]
+        scored = [s for s in scored if s[0] > 0]
+        if scored:
+            scored.sort(key=lambda s: s[0], reverse=True)
+            return scored[0][1].get("trackViewUrl")
+    return None
 
 
 def download_one_song(
-    line: str, output_dir: Path, ignore_gamdl_config: bool = False, clean: bool = False
+    line: str, output_dir: Path, ignore_gamdl_config: bool = False, clean: bool = False,
+    explicit_fallback: bool = False,
 ) -> tuple[str, str | None]:
     """
     Worker task that processes a single line from the song list.
@@ -147,7 +156,7 @@ def download_one_song(
     artist, title = artist.strip(), title.strip()
     search_term = f"{artist} - {title}"
 
-    url = find_track_url(artist, title, clean)
+    url = find_track_url(artist, title, clean, explicit_fallback)
     if not url:
         kind = "clean version" if clean else "match"
         return "not_found", f"No {kind} of '{search_term}' found on Apple Music."
@@ -220,7 +229,7 @@ def convert_one_file(m4a_file: Path, base_dir: Path, audio_format: str, cleanup:
 
 def download_phase(
     file_path: Path, output_dir: Path, num_workers: int,
-    ignore_gamdl_config: bool = False, clean: bool = False,
+    ignore_gamdl_config: bool = False, clean: bool = False, explicit_fallback: bool = False,
 ):
     """Phase 1: Downloads songs in parallel."""
     print("=" * 50)
@@ -235,13 +244,48 @@ def download_phase(
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         # Submit all tasks to the executor
-        future_to_line = {executor.submit(download_one_song, line, output_dir, ignore_gamdl_config, clean): line for line in lines}
+        future_to_line = {executor.submit(download_one_song, line, output_dir, ignore_gamdl_config, clean, explicit_fallback): line for line in lines}
         for future in as_completed(future_to_line):
             status, message = future.result()
             print(f"[{status.upper()}] {message}")
 
 
-def conversion_phase(directory: Path, audio_format: str, cleanup: bool, num_workers: int):
+def censor_phase(directory: Path, converting: bool) -> set[Path]:
+    """
+    Makes clean edits of downloaded tracks with explicit lyrics (see
+    censor_track), one at a time since the models are large. Returns the files
+    that couldn't be censored, so they're kept out of conversion instead of
+    reaching the library explicit.
+    """
+    from censor_track import CLEAN_SUFFIX, Models, censor_file, describe_windows, explicit_regex
+
+    print("\n" + "=" * 50)
+    print("CENSORING EXPLICIT LYRICS")
+    print("=" * 50)
+
+    m4a_files = sorted(f for f in directory.glob("**/*.m4a") if not f.stem.endswith(CLEAN_SUFFIX.strip()))
+    rx, models, failed, censored = explicit_regex(), Models(), set(), 0
+    for m4a_file in m4a_files:
+        name = m4a_file.relative_to(directory)
+        try:
+            # Lossless intermediate when a conversion follows, to avoid a second lossy generation.
+            result = censor_file(m4a_file, rx=rx, models=models, replace=True, lossless=converting)
+        except Exception as e:
+            failed.add(m4a_file)
+            outcome = "leaving it unconverted" if converting else "the explicit original is still in place"
+            print(f"[FAIL] Couldn't censor '{name}'; {outcome}. Error: {e}")
+            continue
+        if result.status == "censored":
+            censored += 1
+            print(f"[CENSORED] '{name}' -> '{result.output.name}' (vocals removed at {describe_windows(result.windows)})")
+        for note in result.notes:
+            print(f"[NOTE] '{name}': {note}")
+    print(f"Checked {len(m4a_files)} file(s); censored {censored}.")
+    return failed
+
+
+def conversion_phase(directory: Path, audio_format: str, cleanup: bool, num_workers: int,
+                     skip: set[Path] = frozenset()):
     """Phase 2: Converts M4A files in parallel."""
     print("\n" + "=" * 50)
     print(f"PHASE 2: CONVERTING TO {audio_format.upper()} (using up to {num_workers} workers)")
@@ -251,7 +295,9 @@ def conversion_phase(directory: Path, audio_format: str, cleanup: bool, num_work
         print("Target format is M4A, no conversion necessary.")
         return
 
-    m4a_files = list(directory.glob("**/*.m4a"))
+    m4a_files = [f for f in directory.glob("**/*.m4a") if f not in skip]
+    if skip:
+        print(f"Not converting {len(skip)} file(s) that couldn't be censored.")
     if not m4a_files:
         print(f"No .m4a files found in '{directory.resolve()}' to convert.")
         return
@@ -282,8 +328,14 @@ def main():
     parser.add_argument("--download-workers", type=int, default=default_dl_workers, help="Number of parallel download processes.")
     parser.add_argument("--convert-workers", type=int, default=cpu_count, help="Number of parallel conversion processes.")
     parser.add_argument("--clean", action="store_true", help="Only download non-explicit (clean/cleaned) versions; songs with none are reported as not found.")
+    parser.add_argument("--censor", action="store_true", help="Make clean edits of tracks with explicit lyrics by removing the vocals under each explicit word (needs: uv sync --extra censor). With --clean, falls back to the explicit version when no clean one exists.")
     parser.add_argument("--ignore-gamdl-config", action="store_true", help="Run gamdl with --no-config-file, ignoring ~/.gamdl/config.ini (use if it was generated with the wrapper enabled).")
     args = parser.parse_args()
+
+    if args.censor:
+        from censor_track import missing_dependencies
+        if missing := missing_dependencies():
+            parser.error(f"--censor needs {', '.join(missing)}; install with: uv sync --extra censor")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -291,9 +343,10 @@ def main():
     if not args.convert_only:
         if not args.list_file:
             parser.error("--list-file is required unless --convert-only is used.")
-        download_phase(Path(args.list_file), output_dir, args.download_workers, args.ignore_gamdl_config, args.clean)
+        download_phase(Path(args.list_file), output_dir, args.download_workers, args.ignore_gamdl_config, args.clean, args.censor)
 
-    conversion_phase(output_dir, args.format, args.cleanup, args.convert_workers)
+    failed_censor = censor_phase(output_dir, converting=args.format != "m4a") if args.censor else set()
+    conversion_phase(output_dir, args.format, args.cleanup, args.convert_workers, failed_censor)
 
     print("\n" + "=" * 50)
     print("All processes complete.")
