@@ -27,13 +27,25 @@ def _tail(*streams: str | None, limit: int = 300) -> str:
 
 # --- Worker Functions (for parallel execution) ---
 
-def _title_match_score(track_name: str, query: str) -> int:
+def _title_match_score(track_name: str, query: str, whole_words: bool = False) -> int:
+    """
+    Scores how well a track title matches the query (3 exact, 2 prefix,
+    1 substring, 0 none). With whole_words, prefix/substring matches must end
+    on a word boundary, so "Change" does not match "Changes".
+    """
     a = (track_name or "").strip().lower()
     b = (query or "").strip().lower()
     if not a or not b:
         return 0
     if a == b:
         return 3
+    if whole_words:
+        short, long_ = sorted((a, b), key=len)
+        if long_.startswith(short) and not long_[len(short)].isalnum():
+            return 2
+        if short is b and re.search(rf"(?<!\w){re.escape(b)}(?!\w)", a):
+            return 1
+        return 0
     if a.startswith(b) or b.startswith(a):
         return 2
     if b in a:
@@ -41,7 +53,7 @@ def _title_match_score(track_name: str, query: str) -> int:
     return 0
 
 
-def find_track_url(artist: str, title: str) -> str | None:
+def find_track_url(artist: str, title: str, clean: bool = False) -> str | None:
     """
     Resolves an Artist/Title pair to an Apple Music track URL by searching
     for the artist first, then matching the title within *that artist's*
@@ -52,6 +64,12 @@ def find_track_url(artist: str, title: str) -> str | None:
     because "Lit" collides with 9+ other artists plus the slang word.
     Mirrors downbeat's apple.service.js searchAppleByArtistAndTrack, which
     fixed the identical problem for Tier 2's own search box.
+
+    With clean=True, tracks Apple flags as explicit are skipped, so a
+    "cleaned" or unflagged edition is used instead (or nothing, if none
+    exists). The artist lookup is capped at 200 tracks and can miss cleaned
+    editions of big catalogs, so a song search is merged in for that case,
+    restricted to tracks whose credited artists include `artist` as a word.
     """
     try:
         artist_resp = requests.get(
@@ -89,7 +107,24 @@ def find_track_url(artist: str, title: str) -> str | None:
         except requests.exceptions.RequestException:
             continue
 
-    scored = [(_title_match_score(t.get("trackName", ""), title), t) for t in all_tracks]
+    if clean:
+        credited = re.compile(rf"(?<!\w){re.escape(normalized_artist)}(?!\w)")
+        try:
+            search_resp = requests.get(
+                "https://itunes.apple.com/search",
+                params={"term": f"{artist} {title}", "entity": "song", "media": "music", "limit": 50},
+                timeout=15,
+            )
+            search_resp.raise_for_status()
+            all_tracks.extend(
+                r for r in search_resp.json().get("results", [])
+                if credited.search((r.get("artistName") or "").lower())
+            )
+        except requests.exceptions.RequestException:
+            pass
+        all_tracks = [t for t in all_tracks if t.get("trackExplicitness") != "explicit"]
+
+    scored = [(_title_match_score(t.get("trackName", ""), title, whole_words=clean), t) for t in all_tracks]
     scored = [s for s in scored if s[0] > 0]
     if not scored:
         return None
@@ -98,7 +133,7 @@ def find_track_url(artist: str, title: str) -> str | None:
 
 
 def download_one_song(
-    line: str, output_dir: Path, ignore_gamdl_config: bool = False
+    line: str, output_dir: Path, ignore_gamdl_config: bool = False, clean: bool = False
 ) -> tuple[str, str | None]:
     """
     Worker task that processes a single line from the song list.
@@ -112,9 +147,10 @@ def download_one_song(
     artist, title = artist.strip(), title.strip()
     search_term = f"{artist} - {title}"
 
-    url = find_track_url(artist, title)
+    url = find_track_url(artist, title, clean)
     if not url:
-        return "not_found", f"'{search_term}' not found on Apple Music."
+        kind = "clean version" if clean else "match"
+        return "not_found", f"No {kind} of '{search_term}' found on Apple Music."
 
     # Download the song. ignore_gamdl_config passes --no-config-file, for
     # machines where ~/.gamdl/config.ini was generated with the wrapper enabled.
@@ -183,7 +219,8 @@ def convert_one_file(m4a_file: Path, base_dir: Path, audio_format: str, cleanup:
 # --- Main Orchestration Functions ---
 
 def download_phase(
-    file_path: Path, output_dir: Path, num_workers: int, ignore_gamdl_config: bool = False
+    file_path: Path, output_dir: Path, num_workers: int,
+    ignore_gamdl_config: bool = False, clean: bool = False,
 ):
     """Phase 1: Downloads songs in parallel."""
     print("=" * 50)
@@ -198,7 +235,7 @@ def download_phase(
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         # Submit all tasks to the executor
-        future_to_line = {executor.submit(download_one_song, line, output_dir, ignore_gamdl_config): line for line in lines}
+        future_to_line = {executor.submit(download_one_song, line, output_dir, ignore_gamdl_config, clean): line for line in lines}
         for future in as_completed(future_to_line):
             status, message = future.result()
             print(f"[{status.upper()}] {message}")
@@ -244,6 +281,7 @@ def main():
     parser.add_argument("--convert-only", action="store_true", help="Skip the download phase and only convert existing files.")
     parser.add_argument("--download-workers", type=int, default=default_dl_workers, help="Number of parallel download processes.")
     parser.add_argument("--convert-workers", type=int, default=cpu_count, help="Number of parallel conversion processes.")
+    parser.add_argument("--clean", action="store_true", help="Only download non-explicit (clean/cleaned) versions; songs with none are reported as not found.")
     parser.add_argument("--ignore-gamdl-config", action="store_true", help="Run gamdl with --no-config-file, ignoring ~/.gamdl/config.ini (use if it was generated with the wrapper enabled).")
     args = parser.parse_args()
 
@@ -253,7 +291,7 @@ def main():
     if not args.convert_only:
         if not args.list_file:
             parser.error("--list-file is required unless --convert-only is used.")
-        download_phase(Path(args.list_file), output_dir, args.download_workers, args.ignore_gamdl_config)
+        download_phase(Path(args.list_file), output_dir, args.download_workers, args.ignore_gamdl_config, args.clean)
 
     conversion_phase(output_dir, args.format, args.cleanup, args.convert_workers)
 

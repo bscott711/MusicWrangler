@@ -68,6 +68,10 @@ Example 4: Aggressive Parallel Processing
 Uses 10 workers for downloading and 8 workers for converting.  
 ./process\_music.py \--list-file song\_list.txt \-o ./MyMusic \-f mp3 \--download-workers 10 \--convert-workers 8
 
+Example 5: Clean Versions Only  
+Skips anything Apple flags as explicit and uses the clean (or unflagged) edition instead. Songs with no clean edition are reported as NOT\_FOUND rather than downloaded.  
+./process\_music.py \--list-file song\_list.txt \-o ./MyMusic \-f mp3 \--clean
+
 ### **2\. The Utility Script: flatten\_directory.py**
 
 Use this script *after* process\_music.py to reorganize your library into a single folder.
