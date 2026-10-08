@@ -28,8 +28,10 @@ Before using these scripts, ensure you have the following installed.
 
 * [**FFmpeg**](https://ffmpeg.org/)**:** The core engine for audio conversion.  
   * On macOS, install via Homebrew: brew install ffmpeg  
-* [**gamdl**](https://github.com/glomatico/gamdl)**:** The tool for downloading from Apple Music.  
-  * Follow its installation instructions. Typically: pip install gamdl
+* [**gamdl**](https://github.com/glomatico/gamdl)**:** The tool for downloading from Apple Music (version 3.8.5 or newer; 2.x breaks when Apple changes its web player). Installed automatically by `uv sync`.  
+  * Requires Python 3.10+ and an active Apple Music subscription.  
+  * Export your Apple Music cookies in Netscape format while logged in at music.apple.com and save them as `cookies.txt` in the directory you run `process-music` from. This file contains your login session, so keep it out of version control (it is listed in `.gitignore`).  
+  * If downloads fail with "Error fetching wrapper account info", gamdl's generated `~/.gamdl/config.ini` has the wrapper enabled; pass `--ignore-gamdl-config` to `process-music` to bypass it.
 
 ### **Python Libraries**
 

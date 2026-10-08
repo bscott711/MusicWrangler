@@ -9,11 +9,20 @@ and conversion phases.
 
 import argparse
 import os
+import re
 import subprocess
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import requests
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _tail(*streams: str | None, limit: int = 300) -> str:
+    """Joins process output, strips color codes, and keeps the last `limit` chars."""
+    text = ANSI_ESCAPE.sub("", "\n".join(s or "" for s in streams)).strip()
+    return text[-limit:] or "no output"
 
 
 # --- Worker Functions (for parallel execution) ---
@@ -88,7 +97,9 @@ def find_track_url(artist: str, title: str) -> str | None:
     return scored[0][1].get("trackViewUrl")
 
 
-def download_one_song(line: str, output_dir: Path) -> tuple[str, str | None]:
+def download_one_song(
+    line: str, output_dir: Path, ignore_gamdl_config: bool = False
+) -> tuple[str, str | None]:
     """
     Worker task that processes a single line from the song list.
     Searches for the URL and calls gamdl.
@@ -105,20 +116,31 @@ def download_one_song(line: str, output_dir: Path) -> tuple[str, str | None]:
     if not url:
         return "not_found", f"'{search_term}' not found on Apple Music."
 
-    # Download the song
+    # Download the song. ignore_gamdl_config passes --no-config-file, for
+    # machines where ~/.gamdl/config.ini was generated with the wrapper enabled.
     try:
-        subprocess.run(
-            [
-                "gamdl", "--output-path", str(output_dir),
-                "--synced-lyrics-format", "ttml", url,
-            ],
-            check=True, capture_output=True, text=True
+        cmd = ["gamdl"]
+        if ignore_gamdl_config:
+            cmd.append("--no-config-file")
+        cmd += [
+            "--output-path", str(output_dir),
+            "--synced-lyrics-format", "ttml", url,
+        ]
+        result = subprocess.run(
+            cmd, check=True, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,  # gamdl prompts (e.g. missing cookies.txt)
         )
-        return "success", f"Successfully downloaded '{search_term}'."
     except subprocess.CalledProcessError as e:
-        return "fail", f"gamdl failed for '{search_term}'. Error: {e.stderr}"
+        return "fail", f"gamdl failed for '{search_term}'. Error: {_tail(e.stdout, e.stderr)}"
     except FileNotFoundError:
         return "fail", "gamdl command not found. Please ensure it is installed."
+
+    # gamdl exits 0 even when a download fails, so check its own summary line.
+    output = ANSI_ESCAPE.sub("", result.stdout + result.stderr)
+    summary = re.search(r"Finished with (\d+) error\(s\)", output)
+    if not summary or int(summary.group(1)) > 0:
+        return "fail", f"gamdl failed for '{search_term}'. Error: {_tail(output)}"
+    return "success", f"Successfully downloaded '{search_term}'."
 
 
 def convert_one_file(m4a_file: Path, base_dir: Path, audio_format: str, cleanup: bool) -> tuple[str, str]:
@@ -160,7 +182,9 @@ def convert_one_file(m4a_file: Path, base_dir: Path, audio_format: str, cleanup:
 
 # --- Main Orchestration Functions ---
 
-def download_phase(file_path: Path, output_dir: Path, num_workers: int):
+def download_phase(
+    file_path: Path, output_dir: Path, num_workers: int, ignore_gamdl_config: bool = False
+):
     """Phase 1: Downloads songs in parallel."""
     print("=" * 50)
     print(f"PHASE 1: DOWNLOADING SONGS (using up to {num_workers} workers)")
@@ -174,7 +198,7 @@ def download_phase(file_path: Path, output_dir: Path, num_workers: int):
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         # Submit all tasks to the executor
-        future_to_line = {executor.submit(download_one_song, line, output_dir): line for line in lines}
+        future_to_line = {executor.submit(download_one_song, line, output_dir, ignore_gamdl_config): line for line in lines}
         for future in as_completed(future_to_line):
             status, message = future.result()
             print(f"[{status.upper()}] {message}")
@@ -220,6 +244,7 @@ def main():
     parser.add_argument("--convert-only", action="store_true", help="Skip the download phase and only convert existing files.")
     parser.add_argument("--download-workers", type=int, default=default_dl_workers, help="Number of parallel download processes.")
     parser.add_argument("--convert-workers", type=int, default=cpu_count, help="Number of parallel conversion processes.")
+    parser.add_argument("--ignore-gamdl-config", action="store_true", help="Run gamdl with --no-config-file, ignoring ~/.gamdl/config.ini (use if it was generated with the wrapper enabled).")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -228,7 +253,7 @@ def main():
     if not args.convert_only:
         if not args.list_file:
             parser.error("--list-file is required unless --convert-only is used.")
-        download_phase(Path(args.list_file), output_dir, args.download_workers)
+        download_phase(Path(args.list_file), output_dir, args.download_workers, args.ignore_gamdl_config)
 
     conversion_phase(output_dir, args.format, args.cleanup, args.convert_workers)
 
